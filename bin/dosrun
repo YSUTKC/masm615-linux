@@ -1,0 +1,128 @@
+#!/usr/bin/env bash
+# Run a 16-bit DOS program in DOSBox and capture its stdout.
+source "$(dirname "$(readlink -f "$0")")/_dos_common.sh"
+
+usage() {
+    cat <<'EOF'
+用法: dosrun [选项] 程序[.exe|.com] [程序参数...]
+
+选项:
+      --gui           打开 DOSBox 窗口运行（图形/键盘/INT 10h 程序）
+  -t, --timeout 秒    无窗口运行的超时时间（默认 10 秒）
+  -i, --input 文件    把文件内容作为程序的标准输入
+  -h, --help          显示本帮助
+
+说明:
+  无窗口模式执行 "程序 > _RUN.TXT"，再把 _RUN.TXT 的内容打印到终端。
+  INT 21h 的字符串/字符输出可以捕获；INT 10h、直接写显存、
+  INT 16h 键盘输入的程序请加 --gui。
+
+示例:
+  dosrun test.exe
+  dosrun count.exe
+  dosrun -i input.txt readkey.exe
+  dosrun --gui game.exe
+EOF
+}
+
+gui=0
+tmo=10
+input=""
+
+while (($#)); do
+    case "$1" in
+        --gui)      gui=1; shift ;;
+        -t|--timeout) [[ $# -ge 2 ]] || die "$1 需要参数"; tmo="$2"; shift 2 ;;
+        -i|--input) [[ $# -ge 2 ]] || die "$1 需要参数"; input="$2"; shift 2 ;;
+        -h|--help)  usage; exit 0 ;;
+        --)         shift; break ;;
+        -*)         die "未知选项: $1" ;;
+        *)          break ;;
+    esac
+done
+
+[[ $# -ge 1 ]] || { usage; exit 2; }
+require_dosbox
+
+prog="$1"
+shift
+abs="$(resolve_program "$prog")" || die "找不到程序: $prog（可省略 .exe/.com）"
+dir="$(dirname "$abs")"
+base="$(basename "$abs")"
+check_dos83 "$base"
+
+dos_cmd="$base"
+for a in "$@"; do
+    dos_cmd+=" \"$a\""
+done
+
+out_name="_RUN.TXT"
+in_name="_IN.TXT"
+rm -f "$dir/$out_name" "$dir/${out_name,,}" "$dir/$in_name" "$dir/${in_name,,}" 2>/dev/null || true
+
+if [[ -n "$input" ]]; then
+    [[ -f "$input" ]] || die "找不到输入文件: $input"
+    cp "$input" "$dir/$in_name"
+elif [[ ! -t 0 ]]; then
+    # Only read stdin when data is actually available; otherwise a background
+    # shell with an open pipe would block forever.
+    if read -t 0 -u 0; then
+        cat > "$dir/$in_name"
+    fi
+fi
+
+if [[ -f "$dir/$in_name" ]]; then
+    sed -i 's/\r$//' "$dir/$in_name"
+    sed -i 's/$/\r/' "$dir/$in_name"
+fi
+
+if (( gui )); then
+    gui_err="$dir/_GUI.ERR"
+    rm -f "$gui_err" 2>/dev/null || true
+    set +e
+    env -u SDL_VIDEODRIVER -u SDL_AUDIODRIVER \
+        "$DOSBOX" --nolocalconf --noautoexec --exit \
+        --set cputype=pentium \
+        -c "mount c \"$dir\"" -c "c:" -c "$dos_cmd" -c "exit" 2>"$gui_err"
+    rc=$?
+    set -e
+    if (( rc != 0 )) && [[ -s "$gui_err" ]]; then
+        tail -n 30 "$gui_err" >&2
+    fi
+    rm -f "$gui_err" "$dir/$in_name" 2>/dev/null || true
+    exit "$rc"
+fi
+
+redir=" > $out_name"
+[[ -f "$dir/$in_name" ]] && redir=" < $in_name$redir"
+
+err="$dir/_RUN.ERR"
+rm -f "$err"
+set +e
+dosbox_batch "$dir" "$dos_cmd$redir" "$tmo" "$err"
+rc=$?
+set -e
+
+outfile="$(find_ci "$dir" "$out_name")"
+if [[ -n "$outfile" && -s "$outfile" ]]; then
+    sed 's/\r$//' "$outfile"
+    rm -f "$outfile"
+elif [[ -n "$outfile" && -f "$outfile" ]]; then
+    warn "程序没有产生标准输出，可能崩溃了，或使用了 INT 10h/直接写显存。"
+    warn "如果程序是图形/键盘交互程序，请改用: dosrun --gui $base"
+    [[ -s "$err" ]] && tail -n 20 "$err" >&2
+    rm -f "$outfile"
+else
+    warn "没有捕获到标准输出。"
+    warn "如果程序用了 INT 10h、直接写显存或 INT 16h 键盘输入，请改用: dosrun --gui $base"
+    if [[ -s "$err" ]]; then
+        tail -n 20 "$err" >&2
+    fi
+fi
+
+rm -f "$dir/$in_name" "$err" 2>/dev/null || true
+
+if (( rc == 124 )); then
+    warn "运行超时（${tmo}s），已终止"
+    exit 124
+fi

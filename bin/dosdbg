@@ -1,0 +1,228 @@
+#!/usr/bin/env bash
+# Debug 16-bit DOS programs with DEBUG.EXE inside DOSBox.
+source "$(dirname "$(readlink -f "$0")")/_dos_common.sh"
+
+usage() {
+    cat <<'EOF'
+用法: dosdbg [选项] 程序[.exe|.com] [DEBUG 命令 ...]
+
+选项:
+  -i, --interactive   交互式：保持一个 DEBUG 会话，逐条输入命令（q 退出）
+  -f, --file 文件     从文件读取 DEBUG 命令（每行一条，自动转 CRLF）
+      --gui           打开 DOSBox 窗口，进入原生 DEBUG 界面
+  -h, --help          显示本帮助
+
+常用 DEBUG 命令:
+  r              显示/修改寄存器
+  u [地址]       反汇编
+  d [地址]       显示内存
+  t [n]          单步执行 n 条
+  p [n]          单步跳过子程序
+  g [地址]       运行到地址/运行结束
+  q              退出
+
+示例:
+  dosdbg test.exe r u q
+  dosdbg test.exe "u 0" "t 3" q
+  dosdbg -i test.exe
+  dosdbg --gui test.exe
+EOF
+}
+
+gui=0
+interactive=0
+script_file=""
+
+while (($#)); do
+    case "$1" in
+        --gui)            gui=1; shift ;;
+        -i|--interactive) interactive=1; shift ;;
+        -f|--file)        [[ $# -ge 2 ]] || die "$1 需要参数"; script_file="$2"; shift 2 ;;
+        -h|--help)        usage; exit 0 ;;
+        --)               shift; break ;;
+        -*)               die "未知选项: $1" ;;
+        *)                break ;;
+    esac
+done
+
+[[ $# -ge 1 ]] || { usage; exit 2; }
+require_dosbox
+require_debug
+
+prog="$1"
+shift
+abs="$(resolve_program "$prog")" || die "找不到程序: $prog（可省略 .exe/.com）"
+dir="$(dirname "$abs")"
+base="$(basename "$abs")"
+check_dos83 "$base"
+
+if (( gui )); then
+    gui_err="$dir/_GUI.ERR"
+    rm -f "$gui_err" 2>/dev/null || true
+    set +e
+    env -u SDL_VIDEODRIVER -u SDL_AUDIODRIVER \
+        "$DOSBOX" --nolocalconf --noautoexec --exit \
+        --set cputype=pentium \
+        -c "mount c \"$dir\"" -c "mount x \"$TOOLS\"" -c "c:" \
+        -c "${DEBUG_DOS} $base" -c "exit" 2>"$gui_err"
+    rc=$?
+    set -e
+    if (( rc != 0 )) && [[ -s "$gui_err" ]]; then
+        tail -n 30 "$gui_err" >&2
+    fi
+    rm -f "$gui_err" 2>/dev/null || true
+    exit "$rc"
+fi
+
+debug_capture() {
+    local -a cmds=("$@")
+    local script="_DBG.TXT" out="_DBGOUT.TXT" err="_DBG.ERR"
+    rm -f "$dir/$script" "$dir/$out" "$dir/${script,,}" "$dir/${out,,}" "$dir/$err" 2>/dev/null || true
+
+    : > "$dir/$script"
+    local c
+    for c in "${cmds[@]}"; do
+        printf '%s\r\n' "$c" >> "$dir/$script"
+    done
+    local last="${cmds[${#cmds[@]}-1]:-}"
+    if [[ "${last,,}" != "q" && "${last,,}" != "quit" ]]; then
+        printf 'q\r\n' >> "$dir/$script"
+    fi
+
+    set +e
+    dosbox_batch_tools "$dir" "${DEBUG_DOS} $base < $script > $out" 60 "$dir/$err"
+    local rc=$?
+    set -e
+
+    local of
+    of="$(find_ci "$dir" "$out")"
+    if [[ -n "$of" && -f "$of" ]]; then
+        cat "$of"
+    else
+        warn "DEBUG 没有产生输出"
+        [[ -s "$dir/$err" ]] && tail -n 20 "$dir/$err" >&2
+    fi
+    if (( rc == 124 )); then
+        warn "DEBUG 会话超时（60s），已终止"
+    fi
+
+    [[ -n "$of" ]] && rm -f "$of" 2>/dev/null || true
+    rm -f "$dir/$script" "$dir/$err" 2>/dev/null || true
+}
+
+debug_interactive() {
+    local fifo="$dir/DBGFIFO.TXT" out="$dir/DBGLIVE.TXT" err="$dir/DBGLIVE.ERR"
+    local fifo_name="DBGFIFO.TXT" out_name="DBGLIVE.TXT"
+    rm -f "$fifo" "$out" "$err" 2>/dev/null || true
+    mkfifo "$fifo"
+
+    SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy \
+        "$DOSBOX" \
+        --noprimaryconf --nolocalconf --noautoexec --exit \
+        --set cputype=pentium --set memsize=16 \
+        -c "mount c \"$dir\"" -c "mount x \"$TOOLS\"" -c "c:" \
+        -c "${DEBUG_DOS} $base < $fifo_name > $out_name" >/dev/null 2>"$err" &
+    local box=$!
+
+    exec 3>"$fifo"
+
+    local offset=0
+    local -a chunk
+
+    cleanup_live() {
+        exec 3>&- 2>/dev/null || true
+        if kill -0 "$box" 2>/dev/null; then
+            kill_dosbox_pid "$box"
+        fi
+        wait "$box" 2>/dev/null || true
+        rm -f "$fifo" "$out" "$err" 2>/dev/null || true
+    }
+    trap 'printf "\n"; cleanup_live; exit 130' INT TERM
+
+    wait_prompt() {
+        while true; do
+            if [[ -f "$out" ]]; then
+                local sz
+                sz="$(stat -c%s "$out" 2>/dev/null || echo 0)"
+                if (( sz > offset )) && [[ "$(tail -c 1 "$out" 2>/dev/null)" == "-" ]]; then
+                    return 0
+                fi
+            fi
+            kill -0 "$box" 2>/dev/null || return 1
+            sleep 0.05
+        done
+    }
+
+    print_new() {
+        local sz chunk
+        sz="$(stat -c%s "$out" 2>/dev/null || echo 0)"
+        (( sz > offset )) || return 0
+        chunk="$(tail -c +$((offset + 1)) "$out")"
+        offset=$sz
+        [[ "$chunk" == *- ]] && chunk="${chunk%-}"
+        chunk="${chunk//$'\r'/}"
+        [[ -n "$chunk" ]] && printf '%s\n' "$chunk"
+        return 0
+    }
+
+    printf '已进入 DEBUG（程序: %s）。输入 q 退出。\n' "$base"
+    if ! wait_prompt; then
+        warn "DEBUG 启动失败"
+        [[ -s "$err" ]] && tail -n 20 "$err" >&2
+        cleanup_live
+        return 1
+    fi
+    print_new
+
+    while true; do
+        local cmd
+        if [[ -t 0 ]]; then
+            read -r -p "(dbg) " cmd || break
+        else
+            IFS= read -r cmd || break
+        fi
+        [[ -z "$cmd" ]] && cmd="r"
+
+        if [[ "${cmd,,}" == "q" || "${cmd,,}" == "quit" ]]; then
+            printf 'q\r\n' >&3
+            break
+        fi
+
+        printf '%s\r\n' "$cmd" >&3
+        if ! wait_prompt; then
+            warn "DEBUG 会话已结束"
+            break
+        fi
+        print_new
+    done
+
+    local i
+    for i in {1..50}; do
+        kill -0 "$box" 2>/dev/null || break
+        sleep 0.1
+    done
+    cleanup_live
+    printf '\n'
+}
+
+if (( interactive )); then
+    debug_interactive
+    exit 0
+fi
+
+cmds=()
+if [[ -n "$script_file" ]]; then
+    [[ -f "$script_file" ]] || die "找不到命令文件: $script_file"
+    while IFS= read -r line; do
+        line="${line%$'\r'}"
+        [[ -z "$line" ]] && continue
+        cmds+=("$line")
+    done < "$script_file"
+fi
+cmds+=("$@")
+
+if ((${#cmds[@]} == 0)); then
+    cmds=(r u)
+fi
+
+debug_capture "${cmds[@]}"

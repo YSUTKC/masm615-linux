@@ -1,0 +1,74 @@
+#!/usr/bin/env bash
+# One-command build: assemble + link, optionally run.
+source "$(dirname "$(readlink -f "$0")")/_dos_common.sh"
+
+usage() {
+    cat <<'EOF'
+用法: dosbuild [选项] 文件.asm [更多.asm ...]
+  依次调用 dosasm 和 doslink。
+
+选项:
+  -l, --list        生成 .lst 列表文件
+  -c, --com         生成 .COM 文件（LINK /TINY）
+  -r, --run         连接成功后立即运行
+      --uasm        使用 UASM 汇编
+  -h, --help        显示本帮助
+
+示例:
+  dosbuild test.asm
+  dosbuild -r count.asm
+  dosbuild -l eg61.asm
+  dosbuild a.asm b.asm
+EOF
+}
+
+listing=0
+com=0
+run_after=0
+use_uasm=0
+files=()
+
+while (($#)); do
+    case "$1" in
+        -l|--list) listing=1; shift ;;
+        -c|--com)  com=1; shift ;;
+        -r|--run)  run_after=1; shift ;;
+        --uasm)    use_uasm=1; shift ;;
+        -h|--help) usage; exit 0 ;;
+        --)        shift; files+=("$@"); break ;;
+        -*)        die "未知选项: $1" ;;
+        *)         files+=("$1"); shift ;;
+    esac
+done
+
+((${#files[@]})) || { usage; exit 2; }
+
+asm_args=()
+(( listing )) && asm_args+=(-l)
+(( use_uasm )) && asm_args+=(--uasm)
+"$BIN_DIR/dosasm" "${asm_args[@]}" "${files[@]}"
+
+objs=()
+for f in "${files[@]}"; do
+    abs="$(readlink -f "$f")"
+    dir="$(dirname "$abs")"
+    stem="$(basename "${abs%.*}")"
+    obj="$(find_ci "$dir" "${stem}.obj")"
+    [[ -n "$obj" ]] || die "汇编后找不到 ${stem}.obj"
+    objs+=("$obj")
+done
+
+link_args=()
+(( com )) && link_args+=(-c)
+"$BIN_DIR/doslink" "${link_args[@]}" "${objs[@]}"
+
+if (( run_after )); then
+    first="${objs[0]}"
+    dir="$(dirname "$first")"
+    stem="$(basename "${first%.*}")"
+    ext="exe"
+    (( com )) && ext="com"
+    target="$(find_ci "$dir" "${stem}.${ext}")"
+    [[ -n "$target" ]] || die "找不到生成的可执行文件"
+    "$BIN_DIR/dosrun" "$target"
+fi

@@ -1,0 +1,35 @@
+# Downloaded / user-provided binaries (never commit these)
+/tools/wibo
+/tools/uasm
+/tools/masm615/*
+!/tools/masm615/README.md
+/tools/dos/*
+!/tools/dos/README.md
+
+# Build artifacts
+*.obj
+*.OBJ
+*.exe
+*.EXE
+*.com
+*.COM
+*.lst
+*.LST
+*.map
+*.MAP
+_RUN.TXT
+_IN.TXT
+_RUN.ERR
+_GUI.ERR
+DBGFIFO.TXT
+DBGLIVE.TXT
+DBGLIVE.ERR
+_LINK.LOG
+_LINK.ERR
+_DBG.TXT
+_DBGOUT.TXT
+_DBG.ERR
+
+# Editor / OS
+.DS_Store
+*.swp

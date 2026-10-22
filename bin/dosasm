@@ -1,0 +1,115 @@
+#!/usr/bin/env bash
+# Assemble 16-bit DOS sources with MASM 6.15 (run through wibo on Linux).
+source "$(dirname "$(readlink -f "$0")")/_dos_common.sh"
+
+usage() {
+    cat <<'EOF'
+用法: dosasm [选项] 文件.asm [...]
+  用 MASM 6.15 汇编 16 位 DOS 源程序。
+
+选项:
+  -l, --list        生成 .lst 列表文件（含机器码）
+  -D 名称[=值]      定义符号，可重复
+  -I 目录           添加 include 目录，可重复
+      --uasm        改用 UASM（Linux 原生，支持更全的 386+ 指令）
+  -h, --help        显示本帮助
+
+示例:
+  dosasm test.asm
+  dosasm -l count.asm
+  dosasm --uasm t686.asm
+EOF
+}
+
+listing=0
+use_uasm=0
+defines=()
+includes=()
+files=()
+
+while (($#)); do
+    case "$1" in
+        -l|--list) listing=1; shift ;;
+        --uasm)    use_uasm=1; shift ;;
+        -D)        [[ $# -ge 2 ]] || die "-D 需要参数"; defines+=("$2"); shift 2 ;;
+        -D*)       defines+=("${1#-D}"); shift ;;
+        -I)        [[ $# -ge 2 ]] || die "-I 需要参数"; includes+=("$2"); shift 2 ;;
+        -I*)       includes+=("${1#-I}"); shift ;;
+        -h|--help) usage; exit 0 ;;
+        --)        shift; files+=("$@"); break ;;
+        -*)        die "未知选项: $1" ;;
+        *)         files+=("$1"); shift ;;
+    esac
+done
+
+((${#files[@]})) || { usage; exit 2; }
+
+if (( use_uasm )); then
+    require_uasm
+else
+    require_ml
+fi
+
+status=0
+for f in "${files[@]}"; do
+    if [[ ! -f "$f" ]]; then
+        printf '错误: 找不到源文件 %s\n' "$f" >&2
+        status=1
+        continue
+    fi
+
+    abs="$(readlink -f "$f")"
+    dir="$(dirname "$abs")"
+    base="$(basename "$abs")"
+    stem="${base%.*}"
+    printf '==> %s\n' "$abs"
+    if ! is_dos83 "$base"; then
+        warn "源文件名 '$base' 超过 DOS 8.3 限制；汇编可以完成，但连接/运行前请改成短文件名。"
+    fi
+
+    # Remove stale outputs, including case variants, so a failed assembly
+    # never leaves a previous .obj behind.
+    find "$dir" -maxdepth 1 -iname "${stem}.obj" -delete 2>/dev/null || true
+    if (( listing )); then
+        find "$dir" -maxdepth 1 -iname "${stem}.lst" -delete 2>/dev/null || true
+    fi
+
+    if (( use_uasm )); then
+        args=(-q -c "-Fo${stem}.obj")
+        (( listing )) && args+=("-Fl${stem}.lst")
+        for d in "${defines[@]}";  do args+=("-D$d"); done
+        for i in "${includes[@]}"; do args+=("-I$i"); done
+        args+=("$base")
+
+        set +e
+        out="$(cd "$dir" && "$UASM" "${args[@]}" 2>&1)"
+        rc=$?
+        set -e
+        printf '%s\n' "$out"
+        (( rc == 0 )) || status=1
+    else
+        args=(/nologo /c)
+        (( listing )) && args+=(/Fl)
+        for d in "${defines[@]}";  do args+=("/D$d"); done
+        for i in "${includes[@]}"; do args+=("/I$i"); done
+        args+=("$base")
+
+        set +e
+        out="$(cd "$dir" && "$WIBO" "$ML" "${args[@]}" 2>&1)"
+        rc=$?
+        set -e
+        printf '%s\n' "$out"
+        if (( rc != 0 )) || grep -qiE '(fatal error|error) A[0-9]+' <<<"$out"; then
+            status=1
+        fi
+    fi
+
+    obj="$(find_ci "$dir" "${stem}.obj")"
+    [[ -n "$obj" ]] && printf '    目标文件: %s\n' "$obj"
+    if (( listing )); then
+        lst="$(find_ci "$dir" "${stem}.lst")"
+        [[ -n "$lst" ]] && printf '    列表文件: %s\n' "$lst"
+    fi
+done
+
+exit "$status"

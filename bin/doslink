@@ -1,0 +1,109 @@
+#!/usr/bin/env bash
+# Link 16-bit DOS objects with LINK 5.31 inside headless DOSBox.
+source "$(dirname "$(readlink -f "$0")")/_dos_common.sh"
+
+usage() {
+    cat <<'EOF'
+用法: doslink [选项] 文件.obj [更多.obj ...]
+  用 LINK.EXE 5.31 连接 16 位 DOS 目标文件。
+
+选项:
+  -c, --com         生成 .COM 文件（LINK /TINY）
+  -m, --map         生成 .MAP 映射文件
+  -h, --help        显示本帮助
+
+示例:
+  doslink test.obj
+  doslink -c hello.obj
+  doslink a.obj b.obj
+EOF
+}
+
+com=0
+map=0
+objs=()
+
+while (($#)); do
+    case "$1" in
+        -c|--com)  com=1; shift ;;
+        -m|--map)  map=1; shift ;;
+        -h|--help) usage; exit 0 ;;
+        --)        shift; objs+=("$@"); break ;;
+        -*)        die "未知选项: $1" ;;
+        *)         objs+=("$1"); shift ;;
+    esac
+done
+
+((${#objs[@]})) || { usage; exit 2; }
+require_dosbox
+require_link
+
+first="$(readlink -f "${objs[0]}")" || die "找不到 ${objs[0]}"
+dir="$(dirname "$first")"
+names=()
+for o in "${objs[@]}"; do
+    [[ -f "$o" ]] || die "找不到目标文件: $o"
+    abs="$(readlink -f "$o")"
+    [[ "$(dirname "$abs")" == "$dir" ]] || die "所有 .obj 必须放在同一目录: $o"
+    check_dos83 "$(basename "$abs")"
+    names+=("$(basename "$abs")")
+done
+
+joined="${names[0]}"
+for ((i = 1; i < ${#names[@]}; i++)); do
+    joined+="+${names[$i]}"
+done
+
+opts=""
+(( com )) && opts+=" /TINY"
+(( map )) && opts+=" /MAP"
+
+stem="${names[0]%.*}"
+ext="exe"
+(( com )) && ext="com"
+
+# Remove stale outputs so a failed link cannot masquerade as success.
+find "$dir" -maxdepth 1 -iname "${stem}.${ext}" -delete 2>/dev/null || true
+log="_LINK.LOG"
+rm -f "$dir/$log" "$dir/${log,,}" 2>/dev/null || true
+
+cmd="${LINK_DOS}${opts} ${joined}; > ${log}"
+err="$dir/_LINK.ERR"
+rm -f "$err"
+
+set +e
+dosbox_batch_tools "$dir" "$cmd" 60 "$err"
+rc=$?
+set -e
+
+logfile="$(find_ci "$dir" "$log")"
+logtext=""
+if [[ -n "$logfile" && -f "$logfile" ]]; then
+    logtext="$(cat "$logfile")"
+    printf '%s\n' "$logtext"
+    rm -f "$logfile"
+fi
+
+if (( rc != 0 )); then
+    warn "DOSBox 执行失败（退出码 $rc）"
+    [[ -s "$err" ]] && tail -n 20 "$err" >&2
+    rm -f "$err"
+    exit 1
+fi
+
+if grep -qiE 'fatal error L[0-9]+|error L[0-9]+|cannot open|unresolved external' <<<"$logtext"; then
+    rm -f "$err"
+    exit 1
+fi
+
+target="$(find_ci "$dir" "${stem}.${ext}")"
+if [[ -z "$target" || ! -f "$target" ]]; then
+    warn "连接似乎失败，未生成 ${stem}.${ext}"
+    [[ -s "$err" ]] && tail -n 20 "$err" >&2
+    rm -f "$err"
+    exit 1
+fi
+
+printf '生成: %s\n' "$target"
+(( map )) && printf '映射文件: %s\n' "$(find_ci "$dir" "${stem}.map")"
+rm -f "$err"
