@@ -309,13 +309,25 @@ subr    endp
 X:\masm615\LINK.EXE MAIN.OBJ+SUBR.OBJ;
 ```
 
+If a source contains `include io.inc`, `dosbuild` automatically appends the
+`io.lib` found in the same directory, so this also works without extra flags:
+
+```bash
+dosbuild -r ioprog.asm
+```
+
 ## 11. .COM files
 
 ```bash
 dosbuild -c -r tiny.asm
 ```
 
-`-c` adds `LINK /TINY`. The output is a `.COM` file.
+`-c` adds `LINK /TINY`. The output is a `.COM` file. If the source starts with
+`.model tiny`, `dosbuild` selects `/TINY` automatically:
+
+```bash
+dosbuild -r tiny.asm      # also produces TINY.COM
+```
 
 ## 12. Input and GUI programs
 
@@ -326,6 +338,14 @@ printf 'A' | dosrun examples/READCH.EXE
 dosrun -i input.txt examples/READCH.EXE
 ```
 
+`-i` converts LF to CRLF by default, which suits line-oriented DOS input.
+For fixed-width input (for example `readbw` reading sixteen binary digits at a
+time), use `--raw` so no extra CR/LF is inserted:
+
+```bash
+dosrun --raw -i bits.txt readbw.exe
+```
+
 Programs using `INT 10h`, direct video memory, or `INT 16h` keyboard input
 must use the DOSBox window:
 
@@ -334,7 +354,10 @@ dosrun --gui game.exe
 ```
 
 In headless mode, `dosrun` can only capture standard output written through
-`INT 21h`.
+`INT 21h`. A program that only changes registers or memory prints nothing;
+that is normal. `dosrun` inspects the matching `.asm` and distinguishes
+"prints nothing by design", "waiting for input", and "probably an infinite
+loop" in its message.
 
 ## 13. How it works internally
 
@@ -358,8 +381,14 @@ See [architecture.md](architecture.md) for the diagram.
 - **`.686` placement**: after `.model`.
 - **snap timeout**: handled by the wrapper; manual `kill` from outside the
   snap may be denied.
-- **No output**: the program may use `INT 10h` or direct video memory; use
-  `--gui`.
+- **No output**: the program may legitimately print nothing, wait for input,
+  or use `INT 10h`/direct video memory; `dosrun` reports which case it
+  detected.
+- **Non-ASCII directory**: DOSBox's `mount` may fail. The wrappers create an
+  ASCII symlink under `~/masm615-mounts/` and mount that instead.
+- **Win32 example**: `.model flat`, `includelib bin32\...`, or MASM32
+  `windows.inc` means a 32-bit Windows program, which this DOS toolchain does
+  not support.
 
 More: [troubleshooting.md](troubleshooting.md).
 

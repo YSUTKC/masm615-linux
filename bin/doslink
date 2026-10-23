@@ -4,8 +4,8 @@ source "$(dirname "$(readlink -f "$0")")/_dos_common.sh"
 
 usage() {
     cat <<'EOF'
-用法: doslink [选项] 文件.obj [更多.obj ...]
-  用 LINK.EXE 5.31 连接 16 位 DOS 目标文件。
+用法: doslink [选项] 文件.obj [更多.obj|库.lib ...]
+  用 LINK.EXE 5.31 连接 16 位 DOS 目标文件和库。
 
 选项:
   -c, --com         生成 .COM 文件（LINK /TINY）
@@ -16,6 +16,7 @@ usage() {
   doslink test.obj
   doslink -c hello.obj
   doslink a.obj b.obj
+  doslink eg101a.obj io.lib
 EOF
 }
 
@@ -44,7 +45,7 @@ names=()
 for o in "${objs[@]}"; do
     [[ -f "$o" ]] || die "找不到目标文件: $o"
     abs="$(readlink -f "$o")"
-    [[ "$(dirname "$abs")" == "$dir" ]] || die "所有 .obj 必须放在同一目录: $o"
+    [[ "$(dirname "$abs")" == "$dir" ]] || die "所有 .obj/.lib 必须放在同一目录: $o"
     check_dos83 "$(basename "$abs")"
     names+=("$(basename "$abs")")
 done
@@ -86,7 +87,7 @@ fi
 
 if (( rc != 0 )); then
     warn "DOSBox 执行失败（退出码 $rc）"
-    [[ -s "$err" ]] && tail -n 20 "$err" >&2
+    filter_dosbox_log "$err" >&2
     rm -f "$err"
     exit 1
 fi
@@ -99,7 +100,7 @@ fi
 target="$(find_ci "$dir" "${stem}.${ext}")"
 if [[ -z "$target" || ! -f "$target" ]]; then
     warn "连接似乎失败，未生成 ${stem}.${ext}"
-    [[ -s "$err" ]] && tail -n 20 "$err" >&2
+    filter_dosbox_log "$err" >&2
     rm -f "$err"
     exit 1
 fi

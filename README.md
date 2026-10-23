@@ -108,13 +108,18 @@ flowchart TB
 - `dosdbg -i` 是持久 FIFO 会话，支持 `r/u/d/t/p/g` 等 DEBUG 命令。
 - 超时看门狗处理 snap 版 DOSBox 的 AppArmor 限制，不残留进程。
 - 支持 UASM 作为原生备用汇编器（`dosasm --uasm`）。
+- `dosbuild` 自动识别 `.model tiny`（按 `.COM` 连接）和 `include io.inc`
+  （自动连接同目录 `io.lib`），不必手写连接参数。
+- 中文等非 ASCII 目录自动转成 ASCII 符号链接再挂载，避免 DOSBox
+  `MOUNT: Can't create drive from file`。
+- Win32/32 位示例会被提前识别并给出明确提示，不会刷一屏连接错误。
 - 附带 7 个可运行的示例程序。
 
 ### 依赖
 
 - Linux x86_64（wibo 是 x86_64 ELF）。
 - `bash`、`git`、`curl`、`timeout`、`find`、`sed`、`awk`、`pkill`、
-  `sha256sum`。
+  `sha1sum`、`sha256sum`。
 - **DOSBox Staging**：`sudo snap install dosbox-staging`，或确保
   `dosbox-staging` 在 `PATH` 中；也可以用 `DOSBOX=/path/to/dosbox-staging`
   指定。
@@ -193,8 +198,11 @@ dosasm -l count.asm            # 生成 count.lst（含机器码）
 dosasm --uasm test.asm         # 改用 UASM
 doslink -c tiny.obj            # 生成 .COM（LINK /TINY）
 doslink -m test.obj            # 生成 .MAP
+doslink eg101a.obj io.lib      # 连接库
 dosrun -t 5 game.exe           # 5 秒超时
 printf 'A' | dosrun examples/READCH.EXE # 管道输入
+dosrun -i input.txt prog.exe   # 从文件输入（自动转 CRLF）
+dosrun --raw -i bits.txt prog.exe       # 固定宽度输入，原样送入
 dosrun --gui game.exe          # 打开 DOSBox 窗口
 dosdbg test.exe r u q          # 脚本化 DEBUG
 dosdbg -i test.exe             # 交互式 DEBUG
@@ -266,15 +274,35 @@ dosdbg -i examples/SORT.EXE
 - `INT 16h` 键盘输入；
 - 图形/全屏模式。
 
+只修改寄存器/内存、不打印任何内容的示例（例如变量/寻址演示）运行后
+没有标准输出是正常现象。`dosrun` 会读取同名 `.asm`，区分“程序本来就不
+输出”“在等键盘输入”“可能死循环”三种情况并给出对应提示。
+
+交互程序可以用输入文件驱动，不必打开窗口：
+
+```bash
+dosrun -i answer.txt prog.exe
+dosrun --raw -i bits.txt prog.exe   # readbw/readhw 等固定宽度输入
+```
+
+`--raw` 不自动把 LF 转成 CRLF。连续读取固定字符数的子程序（例如连续
+输入 80 个 0/1）应使用它，否则自动插入的 CR/LF 会被当成数据。
+
 ### 注意事项
 
 1. **DOS 8.3 文件名**：源文件、`.obj`、`.exe`/`.com` 的主名 ≤8，扩展名 ≤3。
    目录名可以长，因为目录是整体挂载为 `C:` 的。封装会检查并提示。
-2. **DEBUG 输入必须 CRLF**：封装会自动转换；手写命令文件时注意。
-3. **snap 版 DOSBox**：AppArmor 会拒绝外部 `kill`；超时清理由 snap 内部
+2. **非 ASCII 路径**：DOSBox 的 `mount` 不能可靠处理中文路径。封装会在
+   `~/masm615-mounts/` 下自动建一个 ASCII 符号链接再挂载；该目录不能是
+   隐藏目录，否则 snap 的 home 接口访问不到。
+3. **DEBUG 输入必须 CRLF**：封装会自动转换；手写命令文件时注意。
+4. **snap 版 DOSBox**：AppArmor 会拒绝外部 `kill`；超时清理由 snap 内部
    发信号，正常返回 `124` 且不残留进程。
-4. **MASM/LINK/DEBUG 版权**：仓库不提供这些二进制；请使用合法副本。
-5. **CMOV**：DOSBox Staging 不支持；需要时使用 DOSBox-X、真机或 DOS 虚拟机。
+5. **MASM/LINK/DEBUG 版权**：仓库不提供这些二进制；请使用合法副本。
+6. **CMOV**：DOSBox Staging 不支持；需要时使用 DOSBox-X、真机或 DOS 虚拟机。
+7. **Win32 示例**：`.model flat`、`includelib bin32\...`、MASM32 的
+   `windows.inc` 等属于 32 位 Windows 程序，本工具链只处理 16 位 DOS，
+   会提前报错而不是尝试连接。
 
 更多问题见 [docs/troubleshooting.md](docs/troubleshooting.md)。
 
@@ -289,7 +317,9 @@ masm615-linux/
 │   ├── fetch-tools.sh       # 下载 wibo / UASM 并校验
 │   ├── check-env.sh         # 检查环境
 │   └── setup.sh             # 安装命令软链
-├── tests/smoke.sh           # 端到端冒烟测试
+├── tests/
+│   ├── smoke.sh             # 端到端冒烟测试
+│   └── sweep.sh             # 批量扫描课程目录（诊断工具）
 ├── tools/                   # 你自备的 MASM/LINK/DEBUG（被 git 忽略）
 ├── Makefile
 ├── NOTICE.md
@@ -301,8 +331,15 @@ masm615-linux/
 ```bash
 make check    # 检查环境
 make test     # 编译、连接、运行、DEBUG 冒烟测试
+make sweep DIR=/path/to/course/project   # 批量扫描目录中的所有 .asm
 make clean    # 清理示例产物
 ```
+
+`sweep.sh` 会跳过 Win32/32 位示例和纯子程序模块，对每个 16 位 DOS 源文件
+执行“汇编→连接→限时运行”，并给出 `OK` / `BUILD_FAIL` / `RUN_FAIL` /
+`TIMEOUT` / `SKIP` 状态。交互程序在批量扫描中显示 `TIMEOUT` 是正常的；
+可以再用 `dosrun -i 输入文件` 或 `--gui` 单独验证。多模块程序需要把子模块
+一起传给 `dosbuild`，扫描器只能逐个文件尝试。
 
 ### 贡献
 

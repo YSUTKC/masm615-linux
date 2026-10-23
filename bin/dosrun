@@ -7,20 +7,26 @@ usage() {
 用法: dosrun [选项] 程序[.exe|.com] [程序参数...]
 
 选项:
-      --gui           打开 DOSBox 窗口运行（图形/键盘/INT 10h 程序）
+      --gui           打开 DOSBox 窗口运行（需要键盘/图形/INT 10h 的程序）
   -t, --timeout 秒    无窗口运行的超时时间（默认 10 秒）
   -i, --input 文件    把文件内容作为程序的标准输入
+      --raw           输入文件按原样送入，不自动转换成 CRLF
   -h, --help          显示本帮助
 
 说明:
-  无窗口模式执行 "程序 > _RUN.TXT"，再把 _RUN.TXT 的内容打印到终端。
-  INT 21h 的字符串/字符输出可以捕获；INT 10h、直接写显存、
-  INT 16h 键盘输入的程序请加 --gui。
+  无窗口模式会执行 "程序 > _RUN.TXT"，然后把 _RUN.TXT 的内容打印出来。
+  使用 INT 21h 显示字符串/字符的程序可以捕获；
+  使用 INT 10h、直接写 B800 显存或 INT 16h 键盘输入的程序请加 --gui。
+
+  程序只修改寄存器/内存、不产生屏幕输出时，无输出属于正常现象。
+  固定宽度输入（例如连续输入 16 位二进制数）请加 --raw，
+  避免自动插入的 CR/LF 被程序当成数据。
 
 示例:
   dosrun test.exe
   dosrun count.exe
   dosrun -i input.txt readkey.exe
+  dosrun --raw -i bits.txt readbw.exe
   dosrun --gui game.exe
 EOF
 }
@@ -28,12 +34,14 @@ EOF
 gui=0
 tmo=10
 input=""
+raw=0
 
 while (($#)); do
     case "$1" in
         --gui)      gui=1; shift ;;
         -t|--timeout) [[ $# -ge 2 ]] || die "$1 需要参数"; tmo="$2"; shift 2 ;;
         -i|--input) [[ $# -ge 2 ]] || die "$1 需要参数"; input="$2"; shift 2 ;;
+        --raw)      raw=1; shift ;;
         -h|--help)  usage; exit 0 ;;
         --)         shift; break ;;
         -*)         die "未知选项: $1" ;;
@@ -49,6 +57,7 @@ shift
 abs="$(resolve_program "$prog")" || die "找不到程序: $prog（可省略 .exe/.com）"
 dir="$(dirname "$abs")"
 base="$(basename "$abs")"
+stem="${base%.*}"
 check_dos83 "$base"
 
 dos_cmd="$base"
@@ -65,13 +74,17 @@ if [[ -n "$input" ]]; then
     cp "$input" "$dir/$in_name"
 elif [[ ! -t 0 ]]; then
     # Only read stdin when data is actually available; otherwise a background
-    # shell with an open pipe would block forever.
+    # shell with an open pipe would block forever. /dev/null also makes
+    # `read -t 0` succeed, so drop the empty file: a DOS program reading an
+    # empty redirected file sees EOF and may loop forever.
     if read -t 0 -u 0; then
-        cat > "$dir/$in_name"
+        cat > "$dir/$in_name" || true
+        [[ -s "$dir/$in_name" ]] || rm -f "$dir/$in_name"
     fi
 fi
 
-if [[ -f "$dir/$in_name" ]]; then
+if [[ -f "$dir/$in_name" && "$raw" -eq 0 ]]; then
+    # DOS text convention is CRLF; --raw keeps the file byte-for-byte.
     sed -i 's/\r$//' "$dir/$in_name"
     sed -i 's/$/\r/' "$dir/$in_name"
 fi
@@ -79,22 +92,23 @@ fi
 if (( gui )); then
     gui_err="$dir/_GUI.ERR"
     rm -f "$gui_err" 2>/dev/null || true
+    cdir="$(ascii_mount_path "$dir")"
     set +e
     env -u SDL_VIDEODRIVER -u SDL_AUDIODRIVER \
         "$DOSBOX" --nolocalconf --noautoexec --exit \
         --set cputype=pentium \
-        -c "mount c \"$dir\"" -c "c:" -c "$dos_cmd" -c "exit" 2>"$gui_err"
+        -c "mount c \"$cdir\"" -c "c:" -c "$dos_cmd" -c "exit" 2>"$gui_err"
     rc=$?
     set -e
-    if (( rc != 0 )) && [[ -s "$gui_err" ]]; then
-        tail -n 30 "$gui_err" >&2
+    if (( rc != 0 )); then
+        filter_dosbox_log "$gui_err" >&2
     fi
     rm -f "$gui_err" "$dir/$in_name" 2>/dev/null || true
     exit "$rc"
 fi
 
 redir=" > $out_name"
-[[ -f "$dir/$in_name" ]] && redir=" < $in_name$redir"
+[[ -s "$dir/$in_name" ]] && redir=" < $in_name$redir"
 
 err="$dir/_RUN.ERR"
 rm -f "$err"
@@ -104,25 +118,67 @@ rc=$?
 set -e
 
 outfile="$(find_ci "$dir" "$out_name")"
+has_out=0
 if [[ -n "$outfile" && -s "$outfile" ]]; then
-    sed 's/\r$//' "$outfile"
-    rm -f "$outfile"
-elif [[ -n "$outfile" && -f "$outfile" ]]; then
-    warn "程序没有产生标准输出，可能崩溃了，或使用了 INT 10h/直接写显存。"
-    warn "如果程序是图形/键盘交互程序，请改用: dosrun --gui $base"
-    [[ -s "$err" ]] && tail -n 20 "$err" >&2
-    rm -f "$outfile"
-else
-    warn "没有捕获到标准输出。"
-    warn "如果程序用了 INT 10h、直接写显存或 INT 16h 键盘输入，请改用: dosrun --gui $base"
-    if [[ -s "$err" ]]; then
-        tail -n 20 "$err" >&2
+    if (( rc == 124 )) && (( $(stat -c%s "$outfile") > 4000 )); then
+        # A program waiting for input may have printed the same prompt many
+        # times; only show the beginning of the captured output on timeout.
+        head -c 4000 "$outfile" | sed 's/\r$//' || true
+        warn "（输出超过 4000 字节，已截断）"
+    else
+        sed 's/\r$//' "$outfile"
+    fi
+    has_out=1
+fi
+[[ -n "$outfile" ]] && rm -f "$outfile"
+
+# Use the matching source file (case-insensitive) to explain what the program
+# needs when it produces no output or hangs.
+src_hint=""
+uses_int16=0
+reads_input=0
+asm_src="$(find_ci "$dir" "$stem.asm")"
+if [[ -n "$asm_src" && -f "$asm_src" ]]; then
+    if grep -aqiE 'int[[:space:]]+10h' "$asm_src"; then
+        src_hint="INT 10h 图形/文本模式"
+    fi
+    if grep -aqiE 'int[[:space:]]+16h' "$asm_src"; then
+        src_hint="${src_hint:+$src_hint + }INT 16h 键盘输入"
+        uses_int16=1
+    fi
+    if grep -aqiE 'int[[:space:]]+16h|mov[[:space:]]+ah,[[:space:]]*(1h?|01h?|7h?|07h?|8h?|08h?|0ah)\b|call[[:space:]]+(readc|readkey|readmsg|readbb|readbw|readhb|readhw|readuib|readuiw|readsib|readsiw)\b' "$asm_src"; then
+        reads_input=1
+    fi
+fi
+
+if (( rc == 124 )); then
+    if (( uses_int16 )); then
+        warn "运行超时（${tmo}s），已终止：程序在使用 INT 16h 等待键盘输入。"
+        warn "请用窗口模式交互运行: dosrun --gui $base"
+    elif (( reads_input )); then
+        warn "运行超时（${tmo}s），已终止：程序可能在等待键盘/标准输入。"
+        warn "交互运行: dosrun --gui $base"
+        warn "提供固定输入: dosrun -i 输入文件 $base（固定宽度数据可加 --raw）"
+    else
+        warn "运行超时（${tmo}s），已终止：程序可能陷入了死循环（检查跳转/循环）。"
+        warn "如需观察执行过程，请用: dosdbg $base"
+    fi
+elif (( rc != 0 )); then
+    warn "DOSBox 执行失败（退出码 $rc）。"
+    filter_dosbox_log "$err" >&2
+elif (( has_out == 0 )); then
+    if [[ -n "$src_hint" ]]; then
+        warn "程序已结束，但没有标准输出：它使用了 $src_hint。"
+        warn "请改用窗口模式: dosrun --gui $base"
+    else
+        warn "程序已正常结束，但没有标准输出。"
+        warn "这类示例可能只修改寄存器/内存，不产生屏幕输出，属于正常现象。"
+        warn "如果程序用了 INT 10h/直接写显存，请改用: dosrun --gui $base"
     fi
 fi
 
 rm -f "$dir/$in_name" "$err" 2>/dev/null || true
 
 if (( rc == 124 )); then
-    warn "运行超时（${tmo}s），已终止"
     exit 124
 fi

@@ -1,6 +1,6 @@
 SHELL := /bin/bash
 
-.PHONY: check fetch install test clean
+.PHONY: check fetch install test sweep clean
 
 check:
 	./scripts/check-env.sh
@@ -13,6 +13,11 @@ install:
 
 test:
 	./tests/smoke.sh
+
+# Diagnostic sweep of a directory full of .asm files.
+# Usage: make sweep DIR=/path/to/course/project
+sweep:
+	./tests/sweep.sh "$(DIR)"
 
 clean:
 	find examples -maxdepth 1 -type f \

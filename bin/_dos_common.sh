@@ -38,6 +38,43 @@ SNAP_NAME="${SNAP_NAME:-dosbox-staging}"
 die()  { printf '错误: %s\n' "$*" >&2; exit 1; }
 warn() { printf '提示: %s\n' "$*" >&2; }
 
+# Only show useful lines from DOSBox's stderr, dropping the timestamped
+# startup/shutdown chatter.
+filter_dosbox_log() {
+    local file="$1"
+    [[ -s "$file" ]] || return 0
+    grep -avE '^[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3} \|' "$file" \
+        | tail -n 20 || true
+}
+
+# True for Win32/32-bit MASM sources, which this 16-bit DOS toolchain cannot
+# assemble. Keeps the wrappers from printing a wall of linker errors.
+is_win32_source() {
+    local f="$1"
+    grep -aqiE '\.model[[:space:]]+flat|includelib[[:space:]]+(bin32|lib)[\\/]|include[[:space:]]+include[\\/](windows|kernel32|user32)\.inc|include[[:space:]]+listing\.inc' "$f"
+}
+
+# DOSBox's mount is unreliable with non-ASCII paths. When the directory
+# contains Chinese (or any non-ASCII) characters, mount an ASCII symlink under
+# $HOME instead. Avoid hidden directories such as ~/.cache: snap's home
+# interface cannot see them.
+ascii_mount_path() {
+    local dir="$1"
+    if LC_ALL=C grep -q '[^ -~]' <<<"$dir"; then
+        local root="${MASM615_MOUNT_ROOT:-$HOME/masm615-mounts}"
+        if mkdir -p "$root" 2>/dev/null; then
+            local slug link
+            slug="$(printf '%s' "$dir" | sha1sum | cut -c1-12)"
+            link="$root/$slug"
+            if ln -sfn "$dir" "$link" 2>/dev/null; then
+                printf '%s\n' "$link"
+                return 0
+            fi
+        fi
+    fi
+    printf '%s\n' "$dir"
+}
+
 have_cmd() {
     command -v "$1" >/dev/null 2>&1
 }
@@ -182,10 +219,14 @@ dosbox_run_timed() {
         watcher=$!
     fi
 
-    set +e
-    wait "$box" 2>/dev/null
-    local rc=$?
-    set -e
+    local rc
+    # Keep wait inside an if-condition so a non-zero status does not trigger
+    # the caller's set -e (and silently skip its error reporting).
+    if wait "$box" 2>/dev/null; then
+        rc=0
+    else
+        rc=$?
+    fi
 
     if [[ -n "$watcher" ]]; then
         kill -STOP "$watcher" 2>/dev/null || true
@@ -206,6 +247,7 @@ dosbox_run_timed() {
 # Usage: dosbox_batch <dir> <dos-command> <timeout> <stderr-file>
 dosbox_batch() {
     local dir="$1" cmd="$2" tmo="$3" err="$4"
+    dir="$(ascii_mount_path "$dir")"
     dosbox_run_timed "$tmo" "$err" "$DOSBOX" \
         --noprimaryconf --nolocalconf --noautoexec --exit \
         --set cputype=pentium --set memsize=16 \
@@ -216,10 +258,13 @@ dosbox_batch() {
 # called from any source subdirectory.
 dosbox_batch_tools() {
     local dir="$1" cmd="$2" tmo="$3" err="$4"
+    local cdir xdir
+    cdir="$(ascii_mount_path "$dir")"
+    xdir="$(ascii_mount_path "$TOOLS")"
     dosbox_run_timed "$tmo" "$err" "$DOSBOX" \
         --noprimaryconf --nolocalconf --noautoexec --exit \
         --set cputype=pentium --set memsize=16 \
-        -c "mount c \"$dir\"" \
-        -c "mount x \"$TOOLS\"" \
+        -c "mount c \"$cdir\"" \
+        -c "mount x \"$xdir\"" \
         -c "c:" -c "$cmd"
 }

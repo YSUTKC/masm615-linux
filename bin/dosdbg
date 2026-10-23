@@ -59,16 +59,19 @@ check_dos83 "$base"
 if (( gui )); then
     gui_err="$dir/_GUI.ERR"
     rm -f "$gui_err" 2>/dev/null || true
+    local cdir xdir
+    cdir="$(ascii_mount_path "$dir")"
+    xdir="$(ascii_mount_path "$TOOLS")"
     set +e
     env -u SDL_VIDEODRIVER -u SDL_AUDIODRIVER \
         "$DOSBOX" --nolocalconf --noautoexec --exit \
         --set cputype=pentium \
-        -c "mount c \"$dir\"" -c "mount x \"$TOOLS\"" -c "c:" \
+        -c "mount c \"$cdir\"" -c "mount x \"$xdir\"" -c "c:" \
         -c "${DEBUG_DOS} $base" -c "exit" 2>"$gui_err"
     rc=$?
     set -e
-    if (( rc != 0 )) && [[ -s "$gui_err" ]]; then
-        tail -n 30 "$gui_err" >&2
+    if (( rc != 0 )); then
+        filter_dosbox_log "$gui_err" >&2
     fi
     rm -f "$gui_err" 2>/dev/null || true
     exit "$rc"
@@ -100,7 +103,7 @@ debug_capture() {
         cat "$of"
     else
         warn "DEBUG 没有产生输出"
-        [[ -s "$dir/$err" ]] && tail -n 20 "$dir/$err" >&2
+        filter_dosbox_log "$dir/$err" >&2
     fi
     if (( rc == 124 )); then
         warn "DEBUG 会话超时（60s），已终止"
@@ -116,11 +119,14 @@ debug_interactive() {
     rm -f "$fifo" "$out" "$err" 2>/dev/null || true
     mkfifo "$fifo"
 
+    local cdir xdir
+    cdir="$(ascii_mount_path "$dir")"
+    xdir="$(ascii_mount_path "$TOOLS")"
     SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy \
         "$DOSBOX" \
         --noprimaryconf --nolocalconf --noautoexec --exit \
         --set cputype=pentium --set memsize=16 \
-        -c "mount c \"$dir\"" -c "mount x \"$TOOLS\"" -c "c:" \
+        -c "mount c \"$cdir\"" -c "mount x \"$xdir\"" -c "c:" \
         -c "${DEBUG_DOS} $base < $fifo_name > $out_name" >/dev/null 2>"$err" &
     local box=$!
 

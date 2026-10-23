@@ -20,6 +20,7 @@ cleanup() {
            -o -iname '_GUI.ERR' -o -iname 'DBGFIFO.TXT' \
            -o -iname 'DBGLIVE.TXT' -o -iname 'DBGLIVE.ERR' \) \
         -delete 2>/dev/null || true
+    rm -rf "$ROOT/tmp-test" "$ROOT/测试目录" 2>/dev/null || true
 }
 trap cleanup EXIT
 
@@ -43,6 +44,37 @@ echo "== readch =="
 "$BIN/dosbuild" "$ROOT/examples/readch.asm" >/dev/null
 out="$(printf 'A' | "$BIN/dosrun" "$ROOT/examples/READCH.EXE")"
 grep -q '^A' <<<"$out"
+
+echo "== timeout hint =="
+set +e
+out="$("$BIN/dosrun" -t 1 "$ROOT/examples/READCH.EXE" </dev/null 2>&1)"
+rc=$?
+set -e
+[[ "$rc" -eq 124 ]]
+grep -q '等待键盘' <<<"$out"
+
+echo "== auto .COM =="
+rm -rf "$ROOT/tmp-test"; mkdir -p "$ROOT/tmp-test"
+cat > "$ROOT/tmp-test/tinydemo.asm" <<'EOF'
+        .model  tiny
+        .code
+        .startup
+        mov     dx, offset msg
+        mov     ah, 9
+        int     21h
+        .exit
+msg     db      'COM OK', 13, 10, '$'
+        end
+EOF
+out="$(cd "$ROOT/tmp-test" && "$BIN/dosbuild" -r tinydemo.asm)"
+grep -q 'COM OK' <<<"$out"
+find "$ROOT/tmp-test" -maxdepth 1 -iname '*.com' | grep -q .
+
+echo "== non-ASCII path =="
+rm -rf "$ROOT/测试目录"; mkdir -p "$ROOT/测试目录"
+cp "$ROOT/examples/hello.asm" "$ROOT/测试目录/hello.asm"
+out="$(cd "$ROOT/测试目录" && "$BIN/dosbuild" -r hello.asm)"
+grep -q 'Hello DOS!' <<<"$out"
 
 if [[ -x "$ROOT/tools/uasm" ]]; then
     echo "== uasm =="

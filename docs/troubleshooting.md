@@ -91,20 +91,72 @@ must be run with:
 dosrun --gui program.exe
 ```
 
-If the program legitimately prints nothing, the wrapper also reports an empty
-output file.
+If the program legitimately prints nothing (for example it only stores values
+in registers or memory), the empty output is normal. Newer versions of
+`dosrun` inspect the matching `.asm` and print one of three messages:
+
+- "程序已正常结束，但没有标准输出" — the example only changes state;
+- "使用了 INT 10h/INT 16h" — run it with `--gui`;
+- a timeout message that says whether it is waiting for input or likely
+  looping forever.
 
 ## `dosrun` hangs
 
-A headless program may be waiting for keyboard input (`INT 16h`) or looping
-forever. Use:
+A headless program may be waiting for keyboard input (`INT 16h` or `INT 21h`
+`AH=01h`) or looping forever. Use:
 
 ```bash
 dosrun -t 2 program.exe
 ```
 
 The timeout returns `124` and cleans up the DOSBox process. For interactive
-programs, use `--gui`.
+programs:
+
+```bash
+dosrun --gui program.exe
+dosrun -i input.txt program.exe
+dosrun --raw -i bits.txt program.exe   # fixed-width input
+```
+
+If the source has no input calls and no `INT 16h`, the timeout message says
+the program is probably looping; use `dosdbg` to inspect the jump or loop.
+
+## `MOUNT: Can't create drive from file`
+
+DOSBox's `mount` cannot reliably handle non-ASCII directory names. The
+wrappers detect such paths and mount an ASCII symlink under
+`~/masm615-mounts/` instead. Requirements:
+
+- the symlink directory must not be hidden (not `~/.cache`), because snap's
+  home interface cannot see hidden paths;
+- the target directory must be under a path the DOSBox process can read.
+
+If it still fails, move the project to an ASCII path (for example
+`~/dos_workspace/project`) or mount it manually.
+
+## Win32/32-bit example fails immediately
+
+`dosasm`/`dosbuild` reject sources containing:
+
+- `.model flat`;
+- `includelib bin32\...` or `includelib lib\...`;
+- MASM32 `include include\windows.inc`;
+- compiler-generated `include listing.inc`.
+
+These are 32-bit Windows programs. This toolchain only assembles and runs
+16-bit DOS code. Use a Windows toolchain (MASM32/Visual Studio) for them.
+
+## `io.lib` / unresolved external
+
+If a source contains `include io.inc`, `dosbuild` automatically links the
+`io.lib` in the same directory. With `doslink`, list the library explicitly:
+
+```bash
+doslink program.obj io.lib
+```
+
+If the symbol is still unresolved, check that the name exists in `io.lib`
+(for example `dispuiw`, not `dispuid`).
 
 ## `CMOV` behaves incorrectly
 
@@ -162,6 +214,9 @@ Example:
 ```bash
 dosbuild -r main.asm subr.asm
 ```
+
+If the missing symbol comes from `io.lib`, see the `io.lib` section above;
+`dosbuild` adds it automatically when the source includes `io.inc`.
 
 ## `dosbox-staging` not found
 

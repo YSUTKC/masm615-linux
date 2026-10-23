@@ -32,7 +32,7 @@ echo "宿主: $(uname -s) $(uname -m)"
 echo
 
 echo "基础命令:"
-for c in bash git curl timeout find sed awk pkill mktemp sha256sum; do
+for c in bash git curl timeout find sed awk pkill mktemp sha1sum sha256sum; do
     if command -v "$c" >/dev/null 2>&1; then
         say_ok "$c"
     else

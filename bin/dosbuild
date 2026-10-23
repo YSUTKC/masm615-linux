@@ -43,12 +43,30 @@ done
 
 ((${#files[@]})) || { usage; exit 2; }
 
+for f in "${files[@]}"; do
+    [[ -f "$f" ]] || die "找不到源文件: $f"
+    abs="$(readlink -f "$f")"
+    if is_win32_source "$abs"; then
+        die "$(basename "$abs") 是 Win32/32 位示例，本工具链只支持 16 位 DOS 程序（.model small/tiny 等）。"
+    fi
+done
+
+# .model tiny programs are .COM by default; no need to pass -c manually.
+if (( ! com )); then
+    first_abs="$(readlink -f "${files[0]}")"
+    if grep -aqiE '^[[:space:]]*\.model[[:space:]]+tiny' "$first_abs"; then
+        com=1
+    fi
+fi
+
 asm_args=()
 (( listing )) && asm_args+=(-l)
 (( use_uasm )) && asm_args+=(--uasm)
 "$BIN_DIR/dosasm" "${asm_args[@]}" "${files[@]}"
 
 objs=()
+libs=()
+declare -A seen_lib=()
 for f in "${files[@]}"; do
     abs="$(readlink -f "$f")"
     dir="$(dirname "$abs")"
@@ -56,11 +74,22 @@ for f in "${files[@]}"; do
     obj="$(find_ci "$dir" "${stem}.obj")"
     [[ -n "$obj" ]] || die "汇编后找不到 ${stem}.obj"
     objs+=("$obj")
+
+    # If the source includes io.inc, link the io.lib in the same directory.
+    if grep -aqiE 'include[[:space:]]+io\.inc' "$abs"; then
+        io_lib="$(find_ci "$dir" "io.lib")"
+        if [[ -n "$io_lib" && -z "${seen_lib[$io_lib]-}" ]]; then
+            libs+=("$io_lib")
+            seen_lib[$io_lib]=1
+        elif [[ -z "$io_lib" ]]; then
+            warn "$(basename "$abs") 使用了 io.inc，但同目录下没有 io.lib；连接可能因未解析外部符号失败。"
+        fi
+    fi
 done
 
 link_args=()
 (( com )) && link_args+=(-c)
-"$BIN_DIR/doslink" "${link_args[@]}" "${objs[@]}"
+"$BIN_DIR/doslink" "${link_args[@]}" "${objs[@]}" "${libs[@]}"
 
 if (( run_after )); then
     first="${objs[0]}"

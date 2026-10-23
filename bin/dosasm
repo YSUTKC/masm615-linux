@@ -62,6 +62,11 @@ for f in "${files[@]}"; do
     dir="$(dirname "$abs")"
     base="$(basename "$abs")"
     stem="${base%.*}"
+    if is_win32_source "$abs"; then
+        printf '错误: %s 是 Win32/32 位示例，本工具链只支持 16 位 DOS 程序（.model small/tiny 等）。\n' "$base" >&2
+        status=1
+        continue
+    fi
     printf '==> %s\n' "$abs"
     if ! is_dos83 "$base"; then
         warn "源文件名 '$base' 超过 DOS 8.3 限制；汇编可以完成，但连接/运行前请改成短文件名。"
