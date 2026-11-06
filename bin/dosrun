@@ -8,7 +8,8 @@ usage() {
 
 选项:
       --gui           打开 DOSBox 窗口运行（需要键盘/图形/INT 10h 的程序）
-  -t, --timeout 秒    无窗口运行的超时时间（默认 10 秒）
+  -I, --interactive   终端交互模式：边运行边从终端输入（INT 21h 输入的程序）
+  -t, --timeout 秒    无窗口运行的超时时间（默认 10 秒；交互模式不生效）
   -i, --input 文件    把文件内容作为程序的标准输入
       --raw           输入文件按原样送入，不自动转换成 CRLF
   -h, --help          显示本帮助
@@ -18,6 +19,10 @@ usage() {
   使用 INT 21h 显示字符串/字符的程序可以捕获；
   使用 INT 10h、直接写 B800 显存或 INT 16h 键盘输入的程序请加 --gui。
 
+  交互模式 (-I) 通过 FIFO 把终端里输入的每一行实时发给程序，
+  程序输出实时回显，适合 "Enter a number:" 这类问答式程序。
+  每行以回车（CR）结束，与真实键盘一致；输入 exit 或按 Ctrl-D 退出。
+
   程序只修改寄存器/内存、不产生屏幕输出时，无输出属于正常现象。
   固定宽度输入（例如连续输入 16 位二进制数）请加 --raw，
   避免自动插入的 CR/LF 被程序当成数据。
@@ -25,6 +30,7 @@ usage() {
 示例:
   dosrun test.exe
   dosrun count.exe
+  dosrun -I eg508.exe            # 终端交互输入
   dosrun -i input.txt readkey.exe
   dosrun --raw -i bits.txt readbw.exe
   dosrun --gui game.exe
@@ -35,10 +41,12 @@ gui=0
 tmo=10
 input=""
 raw=0
+interactive=0
 
 while (($#)); do
     case "$1" in
         --gui)      gui=1; shift ;;
+        -I|--interactive) interactive=1; shift ;;
         -t|--timeout) [[ $# -ge 2 ]] || die "$1 需要参数"; tmo="$2"; shift 2 ;;
         -i|--input) [[ $# -ge 2 ]] || die "$1 需要参数"; input="$2"; shift 2 ;;
         --raw)      raw=1; shift ;;
@@ -64,6 +72,80 @@ dos_cmd="$base"
 for a in "$@"; do
     dos_cmd+=" \"$a\""
 done
+
+# Interactive terminal mode: a FIFO feeds the program's stdin line by line
+# while its output is echoed live, like `dosdbg -i` but for normal programs.
+interactive_run() {
+    local fifo="$dir/_INFIFO.TXT" fifo_name="_INFIFO.TXT"
+    local out="$dir/_RUN.TXT" out_name="_RUN.TXT" err="$dir/_RUN.ERR"
+    rm -f "$fifo" "$out" "$err" 2>/dev/null || true
+    mkfifo "$fifo"
+
+    local cdir
+    cdir="$(ascii_mount_path "$dir")"
+    SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy \
+        "$DOSBOX" \
+        --noprimaryconf --nolocalconf --noautoexec --exit \
+        --set cputype=pentium --set memsize=16 \
+        -c "mount c \"$cdir\"" -c "c:" \
+        -c "$base < $fifo_name > $out_name" >/dev/null 2>"$err" &
+    local box=$!
+
+    # Open the FIFO writer end (DOSBox's reader open returns once we do).
+    exec 3>"$fifo"
+
+    cleanup_live() {
+        exec 3>&- 2>/dev/null || true
+        if kill -0 "$box" 2>/dev/null; then
+            kill_dosbox_pid "$box"
+        fi
+        wait "$box" 2>/dev/null || true
+        rm -f "$fifo" "$out" "$err" 2>/dev/null || true
+    }
+    trap 'printf "\n"; cleanup_live; exit 130' INT TERM
+
+    printf '已进入交互模式（程序: %s）。输入行会以回车发送；输入 exit 或按 Ctrl-D 退出。\n' "$base"
+
+    # Stream program output live, starting from the beginning of the file.
+    tail -c +1 -f --pid="$box" "$out" 2>/dev/null &
+    local tailer=$!
+
+    local line rc
+    while kill -0 "$box" 2>/dev/null; do
+        IFS= read -r -t 1 line
+        rc=$?
+        if (( rc == 0 )); then
+            if [[ "$line" == "exit" || "$line" == "quit" || "$line" == ":q" ]]; then
+                break
+            fi
+            # DOS Enter is a bare CR, matching a real keyboard.
+            printf '%s\r' "$line" >&3 2>/dev/null || break
+        elif (( rc == 1 )); then
+            break   # EOF (Ctrl-D or end of piped input)
+        fi
+    done
+
+    exec 3>&- 2>/dev/null || true
+    # Give the program a moment to finish its output.
+    local i
+    for i in {1..50}; do
+        kill -0 "$box" 2>/dev/null || break
+        sleep 0.1
+    done
+    cleanup_live
+    kill "$tailer" 2>/dev/null || true
+    wait "$tailer" 2>/dev/null || true
+    trap - INT TERM
+    printf '\n'
+}
+
+if (( interactive )); then
+    set +e
+    interactive_run
+    rc=$?
+    set -e
+    exit "$rc"
+fi
 
 out_name="_RUN.TXT"
 in_name="_IN.TXT"
@@ -157,7 +239,8 @@ if (( rc == 124 )); then
         warn "请用窗口模式交互运行: dosrun --gui $base"
     elif (( reads_input )); then
         warn "运行超时（${tmo}s），已终止：程序可能在等待键盘/标准输入。"
-        warn "交互运行: dosrun --gui $base"
+        warn "终端交互输入: dosrun -I $base"
+        warn "窗口交互运行: dosrun --gui $base"
         warn "提供固定输入: dosrun -i 输入文件 $base（固定宽度数据可加 --raw）"
     else
         warn "运行超时（${tmo}s），已终止：程序可能陷入了死循环（检查跳转/循环）。"

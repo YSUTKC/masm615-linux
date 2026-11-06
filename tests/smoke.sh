@@ -45,6 +45,10 @@ echo "== readch =="
 out="$(printf 'A' | "$BIN/dosrun" "$ROOT/examples/READCH.EXE")"
 grep -q '^A' <<<"$out"
 
+echo "== interactive stdin =="
+out="$(printf 'A\n' | "$BIN/dosrun" -I "$ROOT/examples/READCH.EXE")"
+grep -q '^A' <<<"$out"
+
 echo "== timeout hint =="
 set +e
 out="$("$BIN/dosrun" -t 1 "$ROOT/examples/READCH.EXE" </dev/null 2>&1)"

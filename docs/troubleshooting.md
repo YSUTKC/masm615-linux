@@ -113,10 +113,14 @@ The timeout returns `124` and cleans up the DOSBox process. For interactive
 programs:
 
 ```bash
+dosrun -I program.exe        # type input in the terminal, line by line
 dosrun --gui program.exe
 dosrun -i input.txt program.exe
 dosrun --raw -i bits.txt program.exe   # fixed-width input
 ```
+
+`-I` only works for `INT 21h` input. Programs reading the keyboard via
+`INT 16h` or painting with `INT 10h` need `--gui`.
 
 If the source has no input calls and no `INT 16h`, the timeout message says
 the program is probably looping; use `dosdbg` to inspect the jump or loop.

@@ -202,6 +202,7 @@ doslink eg101a.obj io.lib      # 连接库
 dosrun -t 5 game.exe           # 5 秒超时
 printf 'A' | dosrun examples/READCH.EXE # 管道输入
 dosrun -i input.txt prog.exe   # 从文件输入（自动转 CRLF）
+dosrun -I eg508.exe            # 终端交互输入，逐行实时发送
 dosrun --raw -i bits.txt prog.exe       # 固定宽度输入，原样送入
 dosrun --gui game.exe          # 打开 DOSBox 窗口
 dosdbg test.exe r u q          # 脚本化 DEBUG
@@ -284,6 +285,11 @@ dosdbg -i examples/SORT.EXE
 dosrun -i answer.txt prog.exe
 dosrun --raw -i bits.txt prog.exe   # readbw/readhw 等固定宽度输入
 ```
+
+也可以直接在终端里交互：`dosrun -I eg508.exe` 会通过 FIFO 把你输入的
+每一行实时发给程序，程序输出实时回显，输入 `exit` 或 Ctrl-D 退出。
+这种方式适合 `INT 21h` 问答式输入的程序；`INT 16h` 直接读键盘或
+`INT 10h` 全屏界面仍需 `--gui`。
 
 `--raw` 不自动把 LF 转成 CRLF。连续读取固定字符数的子程序（例如连续
 输入 80 个 0/1）应使用它，否则自动插入的 CR/LF 会被当成数据。

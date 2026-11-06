@@ -338,6 +338,15 @@ printf 'A' | dosrun examples/READCH.EXE
 dosrun -i input.txt examples/READCH.EXE
 ```
 
+For question/answer style programs you can also type interactively in the
+terminal; each line you enter is sent to the program followed by a CR
+(just like pressing Enter on a real keyboard). Type `exit` or press Ctrl-D
+to leave:
+
+```bash
+dosrun -I eg508.exe
+```
+
 `-i` converts LF to CRLF by default, which suits line-oriented DOS input.
 For fixed-width input (for example `readbw` reading sixteen binary digits at a
 time), use `--raw` so no extra CR/LF is inserted:
